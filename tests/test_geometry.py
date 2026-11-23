@@ -1,0 +1,112 @@
+import os
+import random
+import sys
+import unittest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from geometry import (ASPECTS, MAX_SIDE, conform_box, default_box, default_size,  # noqa: E402
+                      parse_crop, resolve_box, snap_size)
+
+
+class SnapSize(unittest.TestCase):
+    def test_free_rounds_each_side_to_the_multiple(self):
+        self.assertEqual(snap_size(1001, 777, None, 64), (1024, 768))
+        self.assertEqual(snap_size(1000, 1000, None, 16), (1008, 1008))
+
+    def test_never_below_one_multiple(self):
+        self.assertEqual(snap_size(1, 1, None, 64), (64, 64))
+        self.assertEqual(snap_size(1, 1, ASPECTS["16:9"], 64), (128, 64))
+
+    def test_ratio_is_as_close_as_the_multiple_allows(self):
+        # 16:9 can't be exact on a 64 grid at this size; 1920x1088 is the nearest
+        self.assertEqual(snap_size(1920, 1080, ASPECTS["16:9"], 64), (1920, 1088))
+        self.assertEqual(snap_size(1280, 720, ASPECTS["16:9"], 16), (1280, 720))
+
+    def test_ratio_is_within_a_pixel_when_multiple_is_one(self):
+        for name, ratio in ASPECTS.items():
+            if ratio is None:
+                continue
+            for size in (1000, 1001, 3333, 4032):
+                w, h = snap_size(size, size, ratio, 1)
+                # the derived side is rounded to the nearest pixel, no further off
+                self.assertLessEqual(abs(w * ratio[1] - h * ratio[0]), max(ratio) / 2, (name, size))
+        self.assertEqual(snap_size(1920, 1080, ASPECTS["16:9"], 1), (1920, 1080))
+
+    def test_idempotent(self):
+        rng = random.Random(1)
+        for _ in range(2000):
+            ratio = rng.choice(list(ASPECTS.values()))
+            n = rng.choice([1, 2, 8, 14, 16, 32, 64, 128])
+            once = snap_size(rng.randint(1, 5000), rng.randint(1, 5000), ratio, n)
+            self.assertEqual(snap_size(*once, ratio, n), once)
+            self.assertEqual(once[0] % n, 0)
+            self.assertEqual(once[1] % n, 0)
+
+
+class DefaultBox(unittest.TestCase):
+    def test_full_image_when_nothing_constrains_it(self):
+        self.assertEqual(default_box(4032, 3024, None, 1), (0, 0, 4032, 3024))
+        self.assertEqual(default_box(4032, 3024, None, 16), (0, 0, 4032, 3024))
+        self.assertEqual(default_box(4032, 3024, ASPECTS["4:3"], 16), (0, 0, 4032, 3024))
+
+    def test_largest_centered_cut(self):
+        self.assertEqual(default_size(4032, 3024, ASPECTS["16:9"], 1), (4032, 2268))
+        self.assertEqual(default_box(1200, 900, ASPECTS["16:9"], 64), (24, 130, 1152, 640))
+        self.assertEqual(default_size(1000, 500, ASPECTS["1:1"], 32), (480, 480))
+
+    def test_always_fits_the_image_when_it_can(self):
+        rng = random.Random(2)
+        for _ in range(2000):
+            iw, ih = rng.randint(64, 6000), rng.randint(64, 6000)
+            ratio = rng.choice(list(ASPECTS.values()))
+            n = rng.choice([1, 8, 16, 32, 64])
+            w, h = default_size(iw, ih, ratio, n)
+            self.assertEqual((w % n, h % n), (0, 0))
+            smallest = snap_size(1, 1, ratio, n)    # an image narrower than this must overhang
+            if iw >= smallest[0] and ih >= smallest[1]:
+                self.assertTrue(w <= iw and h <= ih, (iw, ih, ratio, n, w, h))
+
+    def test_image_smaller_than_one_multiple_overhangs(self):
+        self.assertEqual(default_size(100, 100, None, 256), (256, 256))
+
+
+class Conform(unittest.TestCase):
+    def test_keeps_one_pixel_of_the_image_inside(self):
+        x, y, w, h = conform_box((-5000, 9000, 100, 100), 1200, 900, None, 1)
+        self.assertEqual((x, y), (-99, 899))
+
+    def test_refuses_absurd_sizes(self):
+        with self.assertRaises(ValueError):
+            conform_box((0, 0, MAX_SIDE + 1, 10), 100, 100, None, 1)
+        with self.assertRaises(ValueError):
+            conform_box((0, 0, 16000, 16000), 100, 100, None, 1)
+
+
+class ParseCrop(unittest.TestCase):
+    def test_empty_means_no_crop(self):
+        self.assertIsNone(parse_crop("", 100, 100))
+        self.assertIsNone(parse_crop("   ", 100, 100))
+
+    def test_same_size_image_is_used_as_is(self):
+        self.assertEqual(parse_crop('{"x":-10,"y":5,"w":50,"h":60,"iw":100,"ih":100}', 100, 100),
+                         (-10, 5, 50, 60))
+
+    def test_box_is_scaled_to_a_replaced_image(self):
+        self.assertEqual(parse_crop('{"x":10,"y":10,"w":100,"h":100,"iw":1000,"ih":1000}', 2000, 2000),
+                         (20, 20, 200, 200))
+        self.assertEqual(parse_crop('{"x":-10,"y":0,"w":100,"h":100,"iw":1000,"ih":1000}', 500, 500),
+                         (-5, 0, 50, 50))
+
+    def test_garbage_is_an_error_not_a_silent_full_image(self):
+        for bad in ("not json", "[]", '{"x":1}', '{"x":0,"y":0,"w":0,"h":5}', '{"x":"a","y":0,"w":1,"h":1}'):
+            with self.assertRaises(ValueError, msg=bad):
+                parse_crop(bad, 100, 100)
+
+    def test_resolve_snaps_a_hand_edited_box(self):
+        self.assertEqual(resolve_box('{"x":10,"y":10,"w":1001,"h":777}', 4000, 3000, None, 64),
+                         (10, 10, 1024, 768))
+
+
+if __name__ == "__main__":
+    unittest.main()
