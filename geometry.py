@@ -112,18 +112,40 @@ def default_box(iw, ih, ratio, n):
     return (iw - w) // 2, (ih - h) // 2, w, h
 
 
-def conform_box(box, iw, ih, ratio, n):
+def _axis(pos, size, img, before, after):
+    """Start of a box of `size` along one axis of an `img`-long image, moved
+    the least that keeps it legal: at least one pixel of the image inside, and
+    at most `before` / `after` pixels hanging over the start / end. None if a
+    box this long cannot fit within the image plus those allowances."""
+    lo, hi = -before, img + after - size
+    if lo > hi:
+        return None
+    lo, hi = max(lo, -(size - 1)), min(hi, img - 1)
+    return max(lo, min(hi, pos))
+
+
+def conform_box(box, iw, ih, ratio, n, pads=None):
     """Make an arbitrary box legal. Never raises for a merely odd box; only
-    refuses one that would allocate an absurd amount of memory."""
+    refuses one that would allocate an absurd amount of memory, or that cannot
+    fit the padding allowed.
+
+    pads = (left, top, right, bottom): the most the box may hang over each
+    edge of the image. The default is no limit. A box over an allowance is
+    shifted back inside it, the size is never changed to fit.
+    """
     x, y, w, h = box
     w, h = snap_size(w, h, ratio, n)
     if w > MAX_SIDE or h > MAX_SIDE or w * h > MAX_PIXELS:
         raise ValueError(
             "Crop/pad area %dx%d is too large (limit %d px a side, %d MP)."
             % (w, h, MAX_SIDE, MAX_PIXELS >> 20))
-    # keep at least one pixel of the image inside the box
-    x = max(-(w - 1), min(iw - 1, x))
-    y = max(-(h - 1), min(ih - 1, y))
+    left, top, right, bottom = pads or (MAX_SIDE,) * 4
+    x, y = _axis(x, w, iw, left, right), _axis(y, h, ih, top, bottom)
+    if x is None or y is None:
+        raise ValueError(
+            "Crop/pad area %dx%d does not fit the %dx%d image plus the most padding "
+            "allowed (left %d, top %d, right %d, bottom %d). Raise a max_pad input "
+            "or choose a smaller area." % (w, h, iw, ih, left, top, right, bottom))
     return x, y, w, h
 
 
@@ -155,9 +177,9 @@ def parse_crop(text, iw, ih):
     return x, y, w, h
 
 
-def resolve_box(text, iw, ih, ratio, n):
+def resolve_box(text, iw, ih, ratio, n, pads=None):
     """The box the node will actually cut for these widget values."""
     box = parse_crop(text, iw, ih)
     if box is None:
         box = default_box(iw, ih, ratio, n)
-    return conform_box(box, iw, ih, ratio, n)
+    return conform_box(box, iw, ih, ratio, n, pads)

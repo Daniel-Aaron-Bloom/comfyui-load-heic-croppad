@@ -124,6 +124,56 @@ class Conform(unittest.TestCase):
             conform_box((0, 0, 16000, 16000), 100, 100, None, 1)
 
 
+class Padding(unittest.TestCase):
+    # a 1000x800 image; pads are (left, top, right, bottom)
+    def cut(self, box, pads, iw=1000, ih=800):
+        return conform_box(box, iw, ih, None, 1, pads)
+
+    def test_default_is_no_limit(self):
+        self.assertEqual(self.cut((-300, -200, 500, 400), None), (-300, -200, 500, 400))
+        self.assertEqual(self.cut((-300, -200, 500, 400), (16384,) * 4), (-300, -200, 500, 400))
+
+    def test_a_box_inside_the_allowance_is_untouched(self):
+        self.assertEqual(self.cut((-50, -20, 500, 400), (50, 20, 50, 20)), (-50, -20, 500, 400))
+
+    def test_over_the_limit_is_shifted_back_never_resized(self):
+        self.assertEqual(self.cut((-300, -200, 500, 400), (50, 20, 50, 20)), (-50, -20, 500, 400))
+        self.assertEqual(self.cut((800, 700, 500, 400), (50, 20, 100, 30)), (600, 430, 500, 400))
+
+    def test_zero_never_pads_that_side(self):
+        self.assertEqual(self.cut((-5, 10, 300, 300), (0, 0, 16384, 16384)), (0, 10, 300, 300))
+        # pad on the right still allowed
+        self.assertEqual(self.cut((900, 10, 300, 300), (0, 0, 16384, 0)), (900, 10, 300, 300))
+        self.assertEqual(self.cut((900, 10, 300, 300), (0, 0, 0, 0)), (700, 10, 300, 300))
+
+    def test_a_box_that_cannot_fit_is_an_error_naming_the_fix(self):
+        with self.assertRaisesRegex(ValueError, r"max_pad"):
+            self.cut((0, 0, 1200, 300), (50, 0, 100, 0))     # 1200 > 1000 + 50 + 100
+        with self.assertRaises(ValueError):
+            self.cut((0, 0, 300, 900), (0, 0, 0, 99))         # 900 > 800 + 99
+        self.assertEqual(self.cut((0, 0, 1150, 300), (50, 0, 100, 0)), (-50, 0, 1150, 300))
+
+    def test_default_box_smaller_than_one_multiple_needs_padding(self):
+        # image 100x100, multiple 256: the implied cut overhangs by 78 px a side
+        self.assertEqual(resolve_box("", 100, 100, None, 256, (78, 78, 78, 78)), (-78, -78, 256, 256))
+        with self.assertRaises(ValueError):
+            resolve_box("", 100, 100, None, 256, (0, 0, 0, 0))
+
+    def test_result_always_within_the_allowance(self):
+        rng = random.Random(3)
+        for _ in range(2000):
+            iw, ih = rng.randint(1, 3000), rng.randint(1, 3000)
+            pads = tuple(rng.choice([0, 5, 100, 1000]) for _ in range(4))
+            box = (rng.randint(-4000, 4000), rng.randint(-4000, 4000), rng.randint(1, 3000), rng.randint(1, 3000))
+            try:
+                x, y, w, h = conform_box(box, iw, ih, None, 1, pads)
+            except ValueError:
+                continue
+            self.assertTrue(x >= -pads[0] and y >= -pads[1] and x + w <= iw + pads[2] and y + h <= ih + pads[3],
+                            (box, pads, iw, ih))
+            self.assertTrue(x < iw and y < ih and x + w > 0 and y + h > 0)    # still touches the image
+
+
 class ParseCrop(unittest.TestCase):
     def test_empty_means_no_crop(self):
         self.assertIsNone(parse_crop("", 100, 100))

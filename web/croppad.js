@@ -5,6 +5,8 @@ import { parseAspect } from "./geometry.js";
 
 const NODE = "LoadImageHEICCropPad";
 const MIN_EDITOR_HEIGHT = 220;
+const PAD_LIMITS = ["max_pad_left", "max_pad_top", "max_pad_right", "max_pad_bottom"];
+const MAX_SIDE = 16384;      // geometry.js MAX_SIDE: no limit
 const editors = new Set();   // every live node's editor, for the zoom hook in setup() below
 
 function setup(node) {
@@ -14,6 +16,7 @@ function setup(node) {
     const aspect = widget("aspect_ratio");
     const multiple = widget("multiple_of");
     const fill = widget("pad_fill");
+    const limits = PAD_LIMITS.map(widget);   // absent on a node from before they existed
 
     // `crop` is the editor's storage, not a control. Hide it, and drop its
     // input socket (litegraph addresses links by slot index, so re-point them).
@@ -81,6 +84,10 @@ function setup(node) {
             ratio,
             n: Number(multiple.value) || 1,
             fill: fill.value,
+            pads: limits.map((w) => {
+                const v = Math.round(Number(w?.value));
+                return Number.isFinite(v) ? Math.max(0, Math.min(MAX_SIDE, v)) : MAX_SIDE;
+            }),
         });
     }
 
@@ -133,6 +140,7 @@ function setup(node) {
     wrap(aspect, reshape);
     wrap(multiple, reshape);
     wrap(fill, applyConstraints);
+    for (const w of limits) if (w) wrap(w, reshape);
 
     // Loading a workflow assigns widget values directly, without callbacks.
     const prevConfigure = node.onConfigure;

@@ -19,6 +19,7 @@ RATIOS = [None] + [parse_aspect(t) for t in (
     "1:1", "5:4", "4:3", "3:2", "16:9", "21:9", "4:5", "3:4", "2:3", "9:16", "9:21",
     "2.39", "1.91:1", "0.8", "1234:57", "7:1000")]
 MULTIPLES = [1, 2, 8, 14, 16, 32, 64, 128, 256, 512]
+PADS = [0, 1, 7, 64, 300, 2000, 16384]     # max_pad_* values: left, top, right, bottom
 
 
 def _js(cases):
@@ -48,12 +49,15 @@ class Parity(unittest.TestCase):
                 list(default_size(iw, ih, ratio, n)),
                 list(default_box(iw, ih, ratio, n)),
             ]
-            try:    # the node refuses a box over its size limit; JS only clamps
-                want = list(conform_box(box, iw, ih, ratio, n))
+            pads = rng.choice([None, [0, 0, 0, 0], [16384] * 4]) or [rng.choice(PADS) for _ in range(4)]
+            try:    # the node refuses a box over its size limit or that cannot fit its padding; JS only clamps
+                want = list(conform_box(box, iw, ih, ratio, n, tuple(pads)))
             except ValueError:
                 continue
-            cases.append({"fn": "conform", "box": dict(zip("xywh", box)), "iw": iw, "ih": ih, "ratio": r, "n": n})
-            expected.append(want)
+            case = {"fn": "conform", "box": dict(zip("xywh", box)), "iw": iw, "ih": ih,
+                    "ratio": r, "n": n, "pads": pads}
+            cases += [case, dict(case, fn="conform_ok")]
+            expected += [want, True]
         got = _js(cases)
         for case, want, have in zip(cases, expected, got):
             self.assertEqual(have, want, case)

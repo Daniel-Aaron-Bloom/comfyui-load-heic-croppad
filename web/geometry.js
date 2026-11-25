@@ -95,11 +95,40 @@ export function defaultBox(iw, ih, ratio, n) {
     return { x: div(iw - w, 2), y: div(ih - h, 2), w, h };
 }
 
+// pads = [left, top, right, bottom]: the most a box may hang over each edge of
+// the image. NO_LIMIT is "unlimited" (the size limit is what stops it).
+export const NO_LIMIT = [MAX_SIDE, MAX_SIDE, MAX_SIDE, MAX_SIDE];
+
+// Start of a box of `size` along one axis of an `img`-long image, moved the
+// least that keeps it legal; null if it cannot fit. See _axis in geometry.py.
+function axis(pos, size, img, before, after) {
+    let lo = -before, hi = img + after - size;
+    if (lo > hi) return null;
+    lo = Math.max(lo, -(size - 1));
+    hi = Math.min(hi, img - 1);
+    return Math.max(lo, Math.min(hi, pos));
+}
+
+// The box moved back inside the padding allowed, or null if it cannot fit.
+export function shiftIntoPads(box, iw, ih, pads) {
+    const x = axis(box.x, box.w, iw, pads[0], pads[2]);
+    const y = axis(box.y, box.h, ih, pads[1], pads[3]);
+    return x === null || y === null ? null : { ...box, x, y };
+}
+
+// Does the box stay within the padding allowed?
+export function padsOk(box, iw, ih, pads) {
+    return box.x >= -pads[0] && box.y >= -pads[1]
+        && box.x + box.w <= iw + pads[2] && box.y + box.h <= ih + pads[3];
+}
+
 // Make a box legal the way the node will. Unlike the node it does not throw
-// for an oversized box; use `fits` to refuse one while dragging.
-export function conformBox(box, iw, ih, ratio, n) {
+// for an oversized box or one that cannot fit the padding: use `fits` and
+// `padsOk` to refuse those while dragging.
+export function conformBox(box, iw, ih, ratio, n, pads = NO_LIMIT) {
     const [w, h] = snapSize(box.w, box.h, ratio, n);
-    return {
+    const sized = { x: box.x, y: box.y, w, h };
+    return shiftIntoPads(sized, iw, ih, pads) ?? {
         x: Math.max(-(w - 1), Math.min(iw - 1, box.x)),
         y: Math.max(-(h - 1), Math.min(ih - 1, box.y)),
         w, h,

@@ -6,7 +6,7 @@
 // the padding. The view always shows the image, the box, and a margin around
 // both, so there is room to pull the box outward.
 
-import { snapSize, snapWithin, defaultBox, fits, overlapsImage } from "./geometry.js";
+import { snapSize, snapWithin, defaultBox, fits, overlapsImage, padsOk, shiftIntoPads, NO_LIMIT } from "./geometry.js";
 
 const HANDLE = 10;       // corner grab radius, CSS px
 const MIN_DRAG = 6;      // a drag shorter than this is a click (clears the box)
@@ -27,6 +27,7 @@ export class CropEditor {
         this.ratio = null;         // [a, b] or null
         this.n = 1;
         this.fill = "gray";
+        this.pads = NO_LIMIT;      // [left, top, right, bottom]: most the box may overhang each edge
         this.message = "no image";
         this.drag = null;
         this.quiet = 0;            // frames since the on-screen size last changed (see nudge)
@@ -79,10 +80,11 @@ export class CropEditor {
         this.draw();
     }
 
-    setConstraints({ ratio, n, fill }) {
+    setConstraints({ ratio, n, fill, pads }) {
         this.ratio = ratio ?? null;
         this.n = n || 1;
         this.fill = fill || "gray";
+        this.pads = pads ?? NO_LIMIT;
         this.draw();
     }
 
@@ -109,8 +111,11 @@ export class CropEditor {
             x = Math.max(0, Math.min(this.iw - w, x));
             y = Math.max(0, Math.min(this.ih - h, y));
         }
-        const next = { x, y, w, h };
-        if (!fits(next) || !overlapsImage(next, this.iw, this.ih)) return false;
+        const sized = { x, y, w, h };
+        if (!fits(sized) || !overlapsImage(sized, this.iw, this.ih)) return false;
+        // a box over the padding now allowed is shifted back; one too big for it is left alone
+        const next = shiftIntoPads(sized, this.iw, this.ih, this.pads);
+        if (!next) return false;
         const changed = next.x !== r.x || next.y !== r.y || next.w !== r.w || next.h !== r.h;
         this.rect = next;
         this.draw();
@@ -210,16 +215,18 @@ export class CropEditor {
             // Moving never creates padding on an axis where the box fits in
             // the image; padding comes from pulling a corner outward.
             const s = d.start;
-            const axis = (pos, size, imgSize, v0, vSize, delta) => {
+            // ...and never past the padding allowed (before/after: that axis's limits).
+            const axis = (pos, size, imgSize, v0, vSize, delta, before, after) => {
                 const free = size > imgSize || pos < 0 || pos + size > imgSize;
-                return Math.round(free
-                    ? clamp(pos + delta, v0, v0 + vSize - size)
-                    : clamp(pos + delta, 0, imgSize - size));
+                if (!free) return Math.round(clamp(pos + delta, 0, imgSize - size));
+                const lo = Math.max(v0, -before), hi = Math.min(v0 + vSize - size, imgSize + after - size);
+                return Math.round(lo > hi ? pos : clamp(pos + delta, lo, hi));
             };
+            const [pl, pt, pr, pb] = this.pads;
             next = {
                 ...s,
-                x: axis(s.x, s.w, this.iw, view.x, view.w, sx - d.src[0]),
-                y: axis(s.y, s.h, this.ih, view.y, view.h, sy - d.src[1]),
+                x: axis(s.x, s.w, this.iw, view.x, view.w, sx - d.src[0], pl, pr),
+                y: axis(s.y, s.h, this.ih, view.y, view.h, sy - d.src[1], pt, pb),
             };
         } else if (d.mode === "resize") {
             const s = d.start;
@@ -231,7 +238,8 @@ export class CropEditor {
         } else {
             next = this.#boxFrom({ x: Math.round(d.src[0]), y: Math.round(d.src[1]) }, { x: sx, y: sy }, SLACK / L.s);
         }
-        if (next && fits(next) && overlapsImage(next, this.iw, this.ih)) this.rect = next;
+        if (next && fits(next) && overlapsImage(next, this.iw, this.ih)
+            && padsOk(next, this.iw, this.ih, this.pads)) this.rect = next;
         this.draw();
     }
 
@@ -258,7 +266,8 @@ export class CropEditor {
     // so snapping can't round up into a sliver of padding; once the pointer
     // crosses the image edge the box is free to pad. "Inside" includes a small
     // dead zone (`slack`, source px) past the edge: aiming at an edge and
-    // overshooting by a few pixels must not flip the drag into padding.
+    // overshooting by a few pixels must not flip the drag into padding. Padding
+    // stops where the allowed padding does.
     #boxFrom(anchor, p, slack = 0) {
         const dx = p.x - anchor.x, dy = p.y - anchor.y;
         let w = Math.abs(dx), h = Math.abs(dy);
@@ -269,10 +278,14 @@ export class CropEditor {
         }
         const inImage = (q) => q.x >= -slack && q.x <= this.iw + slack
             && q.y >= -slack && q.y <= this.ih + slack;
-        [w, h] = inImage(anchor) && inImage(p)
-            ? snapWithin(Math.round(w), Math.round(h), this.ratio, this.n,
-                dx < 0 ? anchor.x : this.iw - anchor.x, dy < 0 ? anchor.y : this.ih - anchor.y)
-            : snapSize(Math.round(w), Math.round(h), this.ratio, this.n);
+        // how far the box may grow from the anchor: to the image edge while
+        // inside it, otherwise to the edge of the padding allowed
+        const [pl, pt, pr, pb] = this.pads;
+        const [x0, y0, x1, y1] = inImage(anchor) && inImage(p)
+            ? [0, 0, this.iw, this.ih]
+            : [-pl, -pt, this.iw + pr, this.ih + pb];
+        [w, h] = snapWithin(Math.round(w), Math.round(h), this.ratio, this.n,
+            dx < 0 ? anchor.x - x0 : x1 - anchor.x, dy < 0 ? anchor.y - y0 : y1 - anchor.y);
         return { x: dx < 0 ? anchor.x - w : anchor.x, y: dy < 0 ? anchor.y - h : anchor.y, w, h };
     }
 

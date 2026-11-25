@@ -35,11 +35,14 @@ preview).
 of the box outside the image is hatched in the preview and filled with `pad_fill`.
 Landing on an edge never pads; you have to pull clearly past it.
 
+These are all under the node's **Advanced** section.
+
 | Widget | |
 | --- | --- |
 | `aspect_ratio` | Lock the box's shape. Free text: `16:9`, `4/3`, `1920x1080`, a decimal ratio like `2.39:1`, a bare width/height number like `1.5`, or `free` (or empty) for no lock. Exact when `multiple_of` is 1 (to the pixel); otherwise as close as the multiple allows. 16:9 on a multiple of 64 gives 1920×1088. Text that isn't a ratio is rejected when the workflow is queued; until it parses, the preview keeps the last good ratio. |
 | `multiple_of` | Output width and height are multiples of this (8, 16, 32, 64 for most models). |
 | `pad_fill` | `gray`, `black`, `white`, or `edge` (repeat the border pixels). |
+| `max_pad_left` `max_pad_top` `max_pad_right` `max_pad_bottom` | The most the box may extend past each edge of the image, in pixels. `0` never pads that side; the default (16384) is no limit. The preview stops the box at the limit. If a workflow's box goes over one (say you lowered it), the box is shifted back in, never resized; if it is too big to fit the image plus its allowances, the node errors and names the fix. |
 
 Outputs: `image`, and `mask`, which is 1 over transparent pixels **and over all
 padding**, so it can drive an outpainting/inpainting step directly.

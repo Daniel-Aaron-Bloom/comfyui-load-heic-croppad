@@ -7,7 +7,7 @@ import torch
 import folder_paths
 
 from . import imaging
-from .geometry import parse_aspect, parse_crop, resolve_box
+from .geometry import MAX_SIDE, parse_aspect, parse_crop, resolve_box
 
 
 def input_path(name):
@@ -42,6 +42,9 @@ def list_images():
     return sorted(names)
 
 
+PAD_SIDES = ("left", "top", "right", "bottom")
+
+
 class LoadImageHEICCropPad:
     CATEGORY = "image"
     FUNCTION = "load"
@@ -69,7 +72,7 @@ class LoadImageHEICCropPad:
                                "files can be uploaded from the node.",
                 }),
                 "aspect_ratio": ("STRING", {
-                    "default": "free", "multiline": False,
+                    "default": "free", "multiline": False, "advanced": True,
                     "tooltip": "Lock the area's shape: W:H such as 16:9 or "
                                "2.39:1, a width/height number such as 1.5, "
                                "or 'free'. As close as the multiple allows: "
@@ -77,25 +80,42 @@ class LoadImageHEICCropPad:
                                "not an exact 16:9.",
                 }),
                 "multiple_of": ("INT", {
-                    "default": 1, "min": 1, "max": 512, "step": 1,
+                    "default": 1, "min": 1, "max": 512, "step": 1, "advanced": True,
                     "tooltip": "Width and height of the output are "
                                "multiples of this many pixels (8, 16, 32, "
                                "64 for most models).",
                 }),
                 "pad_fill": (imaging.PAD_CHOICES, {
-                    "default": "gray",
+                    "default": "gray", "advanced": True,
                     "tooltip": "What fills the area outside the image. "
                                "'edge' repeats the image's border pixels.",
                 }),
                 # Written by the editor on the node; never edited by hand.
                 "crop": ("STRING", {"default": "", "multiline": False}),
-            }
+            },
+            # Optional, so they sit after `crop` in a saved workflow's widget
+            # values (which are positional) and an older workflow or API
+            # prompt without them still loads, with no limit.
+            "optional": {
+                "max_pad_" + side: ("INT", {
+                    "default": MAX_SIDE, "min": 0, "max": MAX_SIDE, "step": 1,
+                    "advanced": True,
+                    "tooltip": "The most the area may extend past the "
+                               "image's %s edge, in pixels. 0 never pads "
+                               "that side; the default is no limit. If the "
+                               "area cannot fit, the node errors instead of "
+                               "resizing it." % side,
+                }) for side in PAD_SIDES
+            },
         }
 
-    def load(self, image, aspect_ratio, multiple_of, pad_fill, crop=""):
+    def load(self, image, aspect_ratio, multiple_of, pad_fill, crop="",
+             max_pad_left=MAX_SIDE, max_pad_top=MAX_SIDE,
+             max_pad_right=MAX_SIDE, max_pad_bottom=MAX_SIDE):
         rgb, alpha = imaging.load_arrays(input_path(image))
         ih, iw = rgb.shape[:2]
-        box = resolve_box(crop, iw, ih, parse_aspect(aspect_ratio), multiple_of)
+        pads = (max_pad_left, max_pad_top, max_pad_right, max_pad_bottom)
+        box = resolve_box(crop, iw, ih, parse_aspect(aspect_ratio), multiple_of, pads)
         out, mask = imaging.crop_pad(rgb, alpha, box, pad_fill)
         out = torch.from_numpy(out.astype(np.float32) / 255.0)[None]
         return (out, torch.from_numpy(mask)[None])
