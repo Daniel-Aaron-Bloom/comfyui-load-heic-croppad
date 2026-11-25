@@ -13,6 +13,7 @@ const MIN_DRAG = 6;      // a drag shorter than this is a click (clears the box)
 const SLACK = 10;        // CSS px past an image edge that still counts as "at the edge"
 const GUTTER = 0.2;      // margin around image+box, fraction of the longer side
 const INFO_H = 18;       // info row under the picture
+const SETTLE_FRAMES = 15;   // after the on-screen size last changed, keep looking this long (~250 ms)
 const PAD_COLORS = { gray: "#808080", black: "#000000", white: "#ffffff", edge: "#808080" };
 const CURSORS = { nw: "nwse-resize", se: "nwse-resize", ne: "nesw-resize", sw: "nesw-resize" };
 
@@ -28,6 +29,9 @@ export class CropEditor {
         this.fill = "gray";
         this.message = "no image";
         this.drag = null;
+        this.quiet = 0;            // frames since the on-screen size last changed (see nudge)
+        this.watching = false;
+        this.dead = false;
 
         this.canvas = document.createElement("canvas");
         Object.assign(this.canvas.style, {
@@ -41,11 +45,15 @@ export class CropEditor {
         this.canvas.addEventListener("pointermove", (e) => this.#move(e));
         this.canvas.addEventListener("pointerup", (e) => this.#up(e));
         this.canvas.addEventListener("pointercancel", (e) => this.#up(e, true));
-        this.resizer = new ResizeObserver(() => this.draw());
+        this.resizer = new ResizeObserver(() => {
+            this.draw();
+            this.nudge();
+        });
         this.resizer.observe(container);
     }
 
     destroy() {
+        this.dead = true;
         this.resizer.disconnect();
         this.canvas.remove();
     }
@@ -270,13 +278,43 @@ export class CropEditor {
 
     // ---- drawing ---------------------------------------------------------
 
-    draw() {
-        const c = this.canvas, ctx = this.ctx;
+    // Backing-store size for what is on screen right now: the graph zooms this
+    // element with a CSS transform, so measure it instead of assuming 1:1.
+    #backing() {
+        const c = this.canvas;
         const W = c.clientWidth, H = c.clientHeight;
-        if (!W || !H) return;
+        if (!W || !H) return null;
         const zoom = c.getBoundingClientRect().width / W || 1;
         const k = Math.min(3, Math.max(1, (window.devicePixelRatio || 1) * zoom));
-        const bw = Math.round(W * k), bh = Math.round(H * k);
+        return [W, H, Math.round(W * k), Math.round(H * k)];
+    }
+
+    // The graph's zoom is a CSS transform, which a ResizeObserver never hears
+    // about, and the host applies it after its own draw hooks run. So the
+    // owner calls this whenever the graph redraws; it looks again on the next
+    // frames, redrawing if the backing size no longer fits, until the size has
+    // held still for a moment. Costs nothing while idle.
+    nudge() {
+        this.quiet = 0;
+        if (this.watching || this.dead) return;
+        this.watching = true;
+        const look = () => requestAnimationFrame(() => {
+            if (this.dead) return;
+            const b = this.#backing();
+            const stale = b && (b[2] !== this.canvas.width || b[3] !== this.canvas.height);
+            if (stale) this.draw();
+            this.quiet = stale ? 0 : this.quiet + 1;
+            if (this.quiet < SETTLE_FRAMES) look();
+            else this.watching = false;
+        });
+        look();
+    }
+
+    draw() {
+        const c = this.canvas, ctx = this.ctx;
+        const b = this.#backing();
+        if (!b) return;
+        const [W, H, bw, bh] = b;
         if (c.width !== bw || c.height !== bh) { c.width = bw; c.height = bh; }
         ctx.setTransform(bw / W, 0, 0, bh / H, 0, 0);
         ctx.clearRect(0, 0, W, H);

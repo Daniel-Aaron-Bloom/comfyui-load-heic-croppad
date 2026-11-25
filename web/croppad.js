@@ -5,6 +5,7 @@ import { parseAspect } from "./geometry.js";
 
 const NODE = "LoadImageHEICCropPad";
 const MIN_EDITOR_HEIGHT = 220;
+const editors = new Set();   // every live node's editor, for the zoom hook in setup() below
 
 function setup(node) {
     const widget = (name) => node.widgets.find((w) => w.name === name);
@@ -37,6 +38,7 @@ function setup(node) {
         minHeight: `${MIN_EDITOR_HEIGHT}px`, overflow: "hidden",
     });
     const editor = new CropEditor(container, (rect) => writeCrop(rect));
+    editors.add(editor);
     const editorWidget = node.addDOMWidget("crop_editor", "croppad_editor", container, {
         serialize: false,
         hideOnZoom: false,
@@ -141,6 +143,7 @@ function setup(node) {
     };
     const prevRemoved = node.onRemoved;
     node.onRemoved = function () {
+        editors.delete(editor);
         editor.destroy();
         return prevRemoved?.apply(this, arguments);
     };
@@ -198,6 +201,20 @@ function setup(node) {
 
 app.registerExtension({
     name: "loadheic_croppad",
+    async setup() {
+        // Zooming the graph scales every editor with a CSS transform that
+        // nothing announces to them. The graph canvas redraws on every zoom
+        // and pan, in either renderer: that is the cue for each to look again.
+        for (let waited = 0; !app.canvas && waited < 5000; waited += 30) {
+            await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        if (!app.canvas) return;
+        const previous = app.canvas.onDrawForeground;
+        app.canvas.onDrawForeground = function () {
+            for (const editor of editors) editor.nudge();
+            return previous?.apply(this, arguments);
+        };
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== NODE) return;
         const onNodeCreated = nodeType.prototype.onNodeCreated;
