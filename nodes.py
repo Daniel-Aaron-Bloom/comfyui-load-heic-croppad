@@ -1,7 +1,6 @@
 import hashlib
 import os
 
-import numpy as np
 import torch
 
 import folder_paths
@@ -117,7 +116,7 @@ class LoadImageHEICCropPad:
         pads = (max_pad_left, max_pad_top, max_pad_right, max_pad_bottom)
         box = resolve_box(crop, iw, ih, parse_aspect(aspect_ratio), multiple_of, pads)
         out, mask = imaging.crop_pad(rgb, alpha, box, pad_fill)
-        out = torch.from_numpy(out.astype(np.float32) / 255.0)[None]
+        out = torch.from_numpy(imaging.to_float(out))[None]
         return (out, torch.from_numpy(mask)[None])
 
     @classmethod

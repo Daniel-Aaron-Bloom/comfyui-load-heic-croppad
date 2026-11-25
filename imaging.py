@@ -53,28 +53,65 @@ def open_image(path):
     return Image.open(path)
 
 
+def _orientation(img):
+    try:
+        return img.getexif().get(0x0112, 1)
+    except Exception:
+        return 1
+
+
 def upright_size(img):
     """Size the image will have once EXIF orientation is applied."""
     w, h = img.size
-    try:
-        if img.getexif().get(0x0112, 1) in (5, 6, 7, 8):
-            w, h = h, w
-    except Exception:
-        pass
+    if _orientation(img) in (5, 6, 7, 8):
+        w, h = h, w
     return w, h
 
 
 def to_arrays(img):
-    """-> (rgb uint8 HxWx3, alpha uint8 HxW or None), upright."""
-    img = ImageOps.exif_transpose(img)
+    """-> (rgb uint8 HxWx3, alpha uint8 HxW or None), upright.
+
+    Every step that would copy all the pixels is skipped when it has nothing
+    to do (an upright image, one already RGB, alpha that is already a band):
+    at 8192x8192 each copy is 192 MB, and they used to stack up.
+    """
+    if _orientation(img) in (2, 3, 4, 5, 6, 7, 8):
+        img = ImageOps.exif_transpose(img)       # always copies, so only when it rotates
     if img.mode == "I":
         img = img.point(lambda v: v * (1 / 255))
     bands = img.getbands()
     has_alpha = ("A" in bands or "a" in bands
                  or (img.mode == "P" and "transparency" in img.info))
-    rgb = np.asarray(img.convert("RGB"))
-    alpha = np.asarray(img.convert("RGBA").getchannel("A")) if has_alpha else None
+    rgb = np.asarray(img if img.mode == "RGB" else img.convert("RGB"))
+    alpha = None
+    if has_alpha:
+        band = img.getchannel("A") if "A" in bands else img.convert("RGBA").getchannel("A")
+        alpha = np.asarray(band)
     return rgb, alpha
+
+
+def to_float(rgb):
+    """uint8 HxWx3 -> float32 in 0..1, exactly rgb.astype(float32) / 255.
+
+    Written in place and a band of rows at a time: the one-liner builds the
+    whole float array twice (1.6 GB at 8192x8192 instead of 0.8 GB), and the
+    result is a fresh writable array, which torch.from_numpy needs to be
+    quiet (a crop is a read-only view of the decoded image).
+    """
+    out = np.empty(rgb.shape, np.float32)
+    for y in range(0, rgb.shape[0], 256):
+        band = out[y:y + 256]
+        band[...] = rgb[y:y + 256]
+        band /= 255.0
+    return out
+
+
+def _mask_of(alpha, out):
+    """Into `out` (float32, same shape as alpha): 1 where transparent. Exactly
+    1.0 - alpha.astype(float32) / 255.0, without the three temporaries."""
+    np.divide(alpha, 255.0, out=out, dtype=np.float32)
+    np.subtract(1.0, out, out=out)
+    return out
 
 
 def load_arrays(path):
@@ -113,9 +150,16 @@ def crop_pad(rgb, alpha, box, fill):
         out = rgb[y:y + h, x:x + w]
         if alpha is None:
             return out, np.zeros((h, w), np.float32)
-        return out, 1.0 - alpha[y:y + h, x:x + w].astype(np.float32) / 255.0
+        return out, _mask_of(alpha[y:y + h, x:x + w], np.empty((h, w), np.float32))
 
-    if fill == "edge":
+    # the part of the box that lies on the image, in image and in box coordinates
+    x0, y0, x1, y1 = max(0, x), max(0, y), min(iw, x + w), min(ih, y + h)
+    overlap = x1 > x0 and y1 > y0
+
+    if fill == "edge" and overlap:
+        out = np.pad(rgb[y0:y1, x0:x1],
+                     ((y0 - y, y + h - y1), (x0 - x, x + w - x1), (0, 0)), mode="edge")
+    elif fill == "edge":        # no image under the box at all: repeat the nearest edge pixels
         cols = np.clip(np.arange(x, x + w), 0, iw - 1)
         rows = np.clip(np.arange(y, y + h), 0, ih - 1)
         out = rgb[rows[:, None], cols[None, :]]
@@ -123,13 +167,24 @@ def crop_pad(rgb, alpha, box, fill):
         out = np.full((h, w, 3), PAD_FILLS[fill], np.uint8)
         _paste(out, rgb, -x, -y)
 
-    mask = np.ones((h, w), np.float32)
-    if alpha is None:
-        src_mask = np.zeros((ih, iw), np.float32)
-    else:
-        src_mask = 1.0 - alpha.astype(np.float32) / 255.0
-    _paste(mask, src_mask, -x, -y)
+    mask = np.ones((h, w), np.float32)                  # padding is 1; the image is cleared below
+    if overlap:
+        under = mask[y0 - y:y1 - y, x0 - x:x1 - x]
+        if alpha is None:
+            under[...] = 0.0
+        else:
+            _mask_of(alpha[y0:y1, x0:x1], under)
     return out, mask
+
+
+# What an EXIF orientation value asks for (the table ImageOps.exif_transpose uses).
+_UPRIGHT = {
+    2: Image.Transpose.FLIP_LEFT_RIGHT, 3: Image.Transpose.ROTATE_180,
+    4: Image.Transpose.FLIP_TOP_BOTTOM, 5: Image.Transpose.TRANSPOSE,
+    6: Image.Transpose.ROTATE_270, 7: Image.Transpose.TRANSVERSE,
+    8: Image.Transpose.ROTATE_90,
+}
+_SHRINK_FIRST = ("RGB", "RGBA", "L", "LA")     # modes where shrinking needs no conversion
 
 
 def encode_preview(path, max_edge):
@@ -143,14 +198,31 @@ def encode_preview(path, max_edge):
         width, height = upright_size(img)
         if img.format == "JPEG":
             img.draft("RGB", (max_edge, max_edge))   # decode at reduced scale
-        rgb, alpha = to_arrays(img)
-    pil = Image.fromarray(rgb)
-    if alpha is not None:
-        pil.putalpha(Image.fromarray(alpha))
-    pil.thumbnail((max_edge, max_edge), Image.LANCZOS, reducing_gap=2.0)
-    buf = io.BytesIO()
-    if alpha is not None:
-        pil.save(buf, "PNG", compress_level=1)
-        return buf.getvalue(), "image/png", width, height
-    pil.save(buf, "JPEG", quality=88)
-    return buf.getvalue(), "image/jpeg", width, height
+        if img.mode in _SHRINK_FIRST:
+            # Shrink before anything else copies the pixels: turning a 64 MP
+            # image into arrays and back costs about a gigabyte and a second
+            # to make a picture 1600 px across. The bound is square, so
+            # shrinking then turning gives the picture turning then shrinking
+            # does. Load first and read the orientation then, as
+            # exif_transpose does: a TIFF has its orientation applied (and the
+            # tag cleared) by the load, and the shrunk copy may not carry the
+            # metadata at all.
+            img.load()
+            orientation = _orientation(img)
+            img.thumbnail((max_edge, max_edge), Image.LANCZOS, reducing_gap=2.0)
+            pil = img.transpose(_UPRIGHT[orientation]) if orientation in _UPRIGHT else img
+            has_alpha = "A" in pil.getbands()
+            pil = pil.convert("RGBA" if has_alpha else "RGB")
+        else:
+            rgb, alpha = to_arrays(img)
+            has_alpha = alpha is not None
+            pil = Image.fromarray(rgb)
+            if has_alpha:
+                pil.putalpha(Image.fromarray(alpha))
+            pil.thumbnail((max_edge, max_edge), Image.LANCZOS, reducing_gap=2.0)
+        buf = io.BytesIO()
+        if has_alpha:
+            pil.save(buf, "PNG", compress_level=1)
+            return buf.getvalue(), "image/png", width, height
+        pil.save(buf, "JPEG", quality=88)
+        return buf.getvalue(), "image/jpeg", width, height

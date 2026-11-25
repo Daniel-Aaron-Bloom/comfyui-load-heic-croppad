@@ -1,10 +1,12 @@
+import io
 import os
+import random
 import sys
 import tempfile
 import unittest
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -24,6 +26,187 @@ def card(w=40, h=30):
     rgb[..., 1] = 100
     rgb[:5, :5] = (255, 0, 0)
     return rgb
+
+
+# The straightforward versions that imaging.py's memory-lean ones replaced.
+# The lean ones must give the same bytes (and the same float bits).
+
+def reference_to_arrays(img):
+    img = ImageOps.exif_transpose(img)
+    if img.mode == "I":
+        img = img.point(lambda v: v * (1 / 255))
+    bands = img.getbands()
+    has_alpha = ("A" in bands or "a" in bands
+                 or (img.mode == "P" and "transparency" in img.info))
+    rgb = np.asarray(img.convert("RGB"))
+    alpha = np.asarray(img.convert("RGBA").getchannel("A")) if has_alpha else None
+    return rgb, alpha
+
+
+def reference_crop_pad(rgb, alpha, box, fill):
+    x, y, w, h = box
+    ih, iw = rgb.shape[:2]
+    if x >= 0 and y >= 0 and x + w <= iw and y + h <= ih:
+        out = rgb[y:y + h, x:x + w]
+        if alpha is None:
+            return out, np.zeros((h, w), np.float32)
+        return out, 1.0 - alpha[y:y + h, x:x + w].astype(np.float32) / 255.0
+    if fill == "edge":
+        cols = np.clip(np.arange(x, x + w), 0, iw - 1)
+        rows = np.clip(np.arange(y, y + h), 0, ih - 1)
+        out = rgb[rows[:, None], cols[None, :]]
+    else:
+        out = np.full((h, w, 3), imaging.PAD_FILLS[fill], np.uint8)
+        imaging._paste(out, rgb, -x, -y)
+    mask = np.ones((h, w), np.float32)
+    src_mask = np.zeros((ih, iw), np.float32) if alpha is None else 1.0 - alpha.astype(np.float32) / 255.0
+    imaging._paste(mask, src_mask, -x, -y)
+    return out, mask
+
+
+def noisy(h, w, seed=0, channels=3):
+    return np.random.default_rng(seed).integers(0, 256, (h, w, channels), dtype=np.uint8)
+
+
+class LeanMatchesReference(unittest.TestCase):
+    def test_crop_pad_is_identical_for_every_fill_and_box(self):
+        rng = random.Random(5)
+        for seed in range(60):
+            iw, ih = rng.randint(1, 40), rng.randint(1, 30)
+            rgb = noisy(ih, iw, seed)
+            alpha = noisy(ih, iw, seed + 1, 1)[..., 0] if seed % 2 else None
+            for fill in imaging.PAD_CHOICES:
+                # boxes on, over, and entirely off the image
+                x, y = rng.randint(-60, iw + 20), rng.randint(-60, ih + 20)
+                box = (x, y, rng.randint(1, 80), rng.randint(1, 60))
+                want, want_mask = reference_crop_pad(rgb, alpha, box, fill)
+                got, got_mask = imaging.crop_pad(rgb, alpha, box, fill)
+                np.testing.assert_array_equal(got, want, (seed, fill, box))
+                self.assertEqual(got_mask.dtype, np.float32)
+                np.testing.assert_array_equal(got_mask.view(np.uint32), want_mask.view(np.uint32), (seed, fill, box))
+
+    def test_to_float_matches_astype_divide_to_the_bit(self):
+        for shape in ((1, 1, 3), (7, 5, 3), (300, 3, 3), (513, 2, 3)):     # across the 256-row bands
+            rgb = noisy(*shape[:2], 3)
+            want = rgb.astype(np.float32) / 255.0
+            got = imaging.to_float(rgb)
+            self.assertEqual((got.dtype, got.flags.writeable), (np.float32, True))
+            np.testing.assert_array_equal(got.view(np.uint32), want.view(np.uint32))
+        view = noisy(40, 40, 4)[5:20, 7:30]                 # a non-contiguous crop, as the node passes
+        np.testing.assert_array_equal(imaging.to_float(view), view.astype(np.float32) / 255.0)
+
+    def test_to_arrays_matches_for_every_mode_and_orientation(self):
+        modes = {
+            "RGB": Image.fromarray(noisy(6, 9, 1)),
+            "RGBA": Image.fromarray(noisy(6, 9, 2, 4), "RGBA"),
+            "L": Image.fromarray(noisy(6, 9, 3, 1)[..., 0], "L"),
+            "LA": Image.fromarray(noisy(6, 9, 4, 2), "LA"),
+            "P": Image.fromarray(noisy(6, 9, 5, 1)[..., 0], "L").convert("P"),
+            "CMYK": Image.fromarray(noisy(6, 9, 6, 4), "CMYK"),
+            "I": Image.fromarray(noisy(6, 9, 7, 1)[..., 0].astype(np.int32), "I"),
+        }
+        p = Image.fromarray(noisy(6, 9, 8, 1)[..., 0], "L").convert("P")
+        p.info["transparency"] = 3
+        modes["P+transparency"] = p
+        for name, im in modes.items():
+            for orientation in (None, 1, 2, 3, 4, 5, 6, 7, 8):
+                im = im.copy()
+                if orientation:
+                    ex = Image.Exif()
+                    ex[0x0112] = orientation
+                    im.info["exif"] = ex.tobytes()
+                want_rgb, want_alpha = reference_to_arrays(im)
+                got_rgb, got_alpha = imaging.to_arrays(im)
+                np.testing.assert_array_equal(got_rgb, want_rgb, (name, orientation))
+                self.assertEqual(got_alpha is None, want_alpha is None, (name, orientation))
+                if want_alpha is not None:
+                    np.testing.assert_array_equal(got_alpha, want_alpha, (name, orientation))
+                self.assertEqual(imaging.upright_size(im), got_rgb.shape[1::-1], (name, orientation))
+
+    def test_to_arrays_leaves_the_source_image_alone(self):
+        im = Image.fromarray(noisy(6, 9, 1))
+        before = im.tobytes()
+        imaging.to_arrays(im)
+        self.assertEqual(im.tobytes(), before)
+
+
+def reference_encode_preview(path, max_edge):
+    """encode_preview as it was: every image through arrays, then shrunk."""
+    with imaging.open_image(path) as img:
+        width, height = imaging.upright_size(img)
+        if img.format == "JPEG":
+            img.draft("RGB", (max_edge, max_edge))
+        rgb, alpha = reference_to_arrays(img)
+    pil = Image.fromarray(rgb)
+    if alpha is not None:
+        pil.putalpha(Image.fromarray(alpha))
+    pil.thumbnail((max_edge, max_edge), Image.LANCZOS, reducing_gap=2.0)
+    buf = io.BytesIO()
+    if alpha is not None:
+        pil.save(buf, "PNG", compress_level=1)
+        return buf.getvalue(), "image/png", width, height
+    pil.save(buf, "JPEG", quality=88)
+    return buf.getvalue(), "image/jpeg", width, height
+
+
+class PreviewMatchesReference(unittest.TestCase):
+    """The preview shrinks before it converts (a gigabyte less at 64 MP). It
+    must show the same picture, the right way up."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+
+    def save(self, fmt, mode, orientation):
+        arr = np.random.default_rng(3).integers(0, 256, (60, 90, {"RGB": 3, "RGBA": 4, "L": 1}[mode]), np.uint8)
+        arr = np.kron(arr[::6, ::6], np.ones((6, 6, 1), np.uint8))[:60, :90]    # blocks, so rotation is visible
+        im = Image.fromarray(arr[..., 0] if mode == "L" else arr, mode)
+        ex = Image.Exif()
+        ex[0x0112] = orientation
+        path = os.path.join(self.dir.name, "t." + fmt)
+        im.save(path, exif=ex if fmt == "tiff" else ex.tobytes())    # a TIFF keeps it as a tag
+        return path
+
+    @staticmethod
+    def pixels(body):
+        return np.asarray(Image.open(io.BytesIO(body))).astype(int)
+
+    def test_not_shrunk_is_exactly_the_old_picture_right_way_up(self):
+        # lossless formats, every orientation, nothing to resample
+        for fmt, mode in (("png", "RGBA"), ("png", "RGB"), ("png", "L"), ("tiff", "RGB"), ("webp", "RGBA")):
+            for orientation in range(1, 9):
+                path = self.save(fmt, mode, orientation)
+                got, want = imaging.encode_preview(path, 400), reference_encode_preview(path, 400)
+                self.assertEqual(got[1:], want[1:], (fmt, mode, orientation))
+                if fmt == "webp" and mode == "RGB":
+                    continue
+                np.testing.assert_array_equal(self.pixels(got[0]), self.pixels(want[0]), (fmt, mode, orientation))
+
+    def test_shrunk_and_upright_is_exactly_the_old_picture(self):
+        for fmt, mode in (("png", "RGB"), ("png", "RGBA"), ("png", "L"), ("jpg", "RGB"), ("tiff", "RGBA")):
+            path = self.save(fmt, mode, 1)
+            got, want = imaging.encode_preview(path, 40), reference_encode_preview(path, 40)
+            self.assertEqual(got[1:], want[1:], (fmt, mode))
+            np.testing.assert_array_equal(self.pixels(got[0]), self.pixels(want[0]), (fmt, mode))
+
+    def test_shrunk_and_turned_is_the_same_picture_up_to_resampling_rounding(self):
+        # turning before or after the shrink swaps the order of the two
+        # resampling passes, which moves 8-bit rounding by a level or two
+        for fmt, mode in (("png", "RGB"), ("png", "L"), ("jpg", "RGB"), ("tiff", "RGB"), ("tiff", "L")):
+            for orientation in range(2, 9):
+                path = self.save(fmt, mode, orientation)
+                got, want = imaging.encode_preview(path, 40), reference_encode_preview(path, 40)
+                self.assertEqual(got[1:], want[1:], (fmt, mode, orientation))
+                a, b = self.pixels(got[0]), self.pixels(want[0])
+                self.assertEqual(a.shape, b.shape, (fmt, mode, orientation))
+                self.assertLess(np.abs(a - b).mean(), 4, (fmt, mode, orientation))
+
+    def test_tiff_with_an_orientation_tag_is_turned_once(self):
+        # Pillow applies a TIFF's orientation itself while loading; turning it
+        # again from the tag read before the load would lay it on its side
+        path = self.save("tiff", "RGB", 6)
+        small = Image.open(io.BytesIO(imaging.encode_preview(path, 40)[0]))
+        self.assertEqual(small.size, (27, 40))
 
 
 class CropPad(unittest.TestCase):
