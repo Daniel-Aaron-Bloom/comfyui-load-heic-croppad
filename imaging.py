@@ -60,10 +60,26 @@ def _orientation(img):
         return 1
 
 
+def _size_already_upright(img):
+    """True if Pillow has already swapped img.size for the orientation.
+
+    Its TIFF reader does: it reports the turned size as soon as the file is
+    opened, turns the pixels itself while loading, and then drops the tag. So
+    the stored dimensions differ from img.size, and swapping again would be
+    wrong. (Compared with the tags rather than assumed from the format, so it
+    holds whichever Pillow does it.) A square image reads the same either way.
+    """
+    tags = getattr(img, "tag_v2", None)
+    if tags is None:
+        return False
+    stored = (tags.get(0x0100), tags.get(0x0101))    # ImageWidth, ImageLength
+    return None not in stored and stored != img.size
+
+
 def upright_size(img):
     """Size the image will have once EXIF orientation is applied."""
     w, h = img.size
-    if _orientation(img) in (5, 6, 7, 8):
+    if _orientation(img) in (5, 6, 7, 8) and not _size_already_upright(img):
         w, h = h, w
     return w, h
 

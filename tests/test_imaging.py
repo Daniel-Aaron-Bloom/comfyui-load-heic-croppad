@@ -279,6 +279,23 @@ class Files(unittest.TestCase):
         rgb, _ = imaging.load_arrays(self.path("rot.jpg"))
         self.assertEqual(rgb.shape[:2], (40, 30))
 
+    def test_reported_size_is_the_size_the_node_cuts_for_every_format_and_orientation(self):
+        # The editor draws boxes in the size the preview reports; the node cuts
+        # the decoded array. They must agree, whoever applies the orientation
+        # (a TIFF is turned by Pillow itself as it loads, the rest by us).
+        arr = np.random.default_rng(2).integers(0, 256, (30, 40, 3), np.uint8)    # not square
+        for fmt in ("png", "jpg", "tiff", "webp"):
+            for orientation in range(1, 9):
+                ex = Image.Exif()
+                ex[0x0112] = orientation
+                path = self.path("o.%s" % fmt)
+                Image.fromarray(arr).save(path, exif=ex if fmt == "tiff" else ex.tobytes())
+                rgb, _ = imaging.load_arrays(path)
+                upright = rgb.shape[1::-1]
+                self.assertEqual(upright, (30, 40) if orientation >= 5 else (40, 30), (fmt, orientation))
+                self.assertEqual(imaging.read_size(path), upright, (fmt, orientation))
+                self.assertEqual(imaging.encode_preview(path, 400)[2:], upright, (fmt, orientation))
+
     def test_rgba_png_gives_alpha(self):
         Image.new("RGBA", (8, 6), (1, 2, 3, 0)).save(self.path("a.png"))
         rgb, alpha = imaging.load_arrays(self.path("a.png"))
