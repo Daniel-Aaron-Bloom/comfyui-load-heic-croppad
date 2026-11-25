@@ -5,8 +5,51 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from geometry import (ASPECTS, MAX_SIDE, conform_box, default_box, default_size,  # noqa: E402
-                      parse_crop, resolve_box, snap_size)
+from geometry import (MAX_SIDE, conform_box, default_box, default_size,  # noqa: E402
+                      parse_aspect, parse_crop, resolve_box, snap_size)
+
+# the ratios the node used to offer in a dropdown
+COMMON = {name: parse_aspect(name) for name in (
+    "1:1", "5:4", "4:3", "3:2", "16:9", "21:9", "4:5", "3:4", "2:3", "9:16", "9:21")}
+RATIOS = [None, *COMMON.values()]
+
+
+class ParseAspect(unittest.TestCase):
+    def test_free(self):
+        for text in ("free", "FREE", " free ", "", "   ", "none", None):
+            self.assertIsNone(parse_aspect(text), repr(text))
+
+    def test_w_to_h(self):
+        self.assertEqual(parse_aspect("16:9"), (16, 9))
+        self.assertEqual(parse_aspect(" 9 : 16 "), (9, 16))
+        self.assertEqual(parse_aspect("4/3"), (4, 3))
+        self.assertEqual(parse_aspect("1920x1080"), (16, 9))
+        self.assertEqual(parse_aspect("1920X1080"), (16, 9))
+        self.assertEqual(parse_aspect("1920\u00d71080"), (16, 9))
+
+    def test_reduced(self):
+        self.assertEqual(parse_aspect("32:18"), (16, 9))
+        self.assertEqual(parse_aspect("1:1"), (1, 1))
+        self.assertEqual(parse_aspect("1000:1000"), (1, 1))
+
+    def test_decimals_are_exact_fractions(self):
+        self.assertEqual(parse_aspect("1.5"), (3, 2))
+        self.assertEqual(parse_aspect("0.75"), (3, 4))
+        self.assertEqual(parse_aspect("1.78"), (89, 50))
+        self.assertEqual(parse_aspect("2.39:1"), (239, 100))
+        self.assertEqual(parse_aspect("1.5:0.5"), (3, 1))
+        self.assertEqual(parse_aspect("2"), (2, 1))
+
+    def test_rejects_garbage_and_nonsense(self):
+        for bad in ("abc", "16:", ":9", "16:9:1", "16;9", "-1:1", "1:-1", "1e3", "1.", ".5",
+                    "0", "0:1", "1:0", "0.0", "12345:1", "1.12345", "1,5", "16:9 please",
+                    "\uff11:1", "1:1\n2", "9999.9999:0.0001"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                parse_aspect(bad)
+
+    def test_error_names_the_input_and_how_to_fix_it(self):
+        with self.assertRaisesRegex(ValueError, r"'wide'.*16:9"):
+            parse_aspect("wide")
 
 
 class SnapSize(unittest.TestCase):
@@ -16,27 +59,25 @@ class SnapSize(unittest.TestCase):
 
     def test_never_below_one_multiple(self):
         self.assertEqual(snap_size(1, 1, None, 64), (64, 64))
-        self.assertEqual(snap_size(1, 1, ASPECTS["16:9"], 64), (128, 64))
+        self.assertEqual(snap_size(1, 1, COMMON["16:9"], 64), (128, 64))
 
     def test_ratio_is_as_close_as_the_multiple_allows(self):
         # 16:9 can't be exact on a 64 grid at this size; 1920x1088 is the nearest
-        self.assertEqual(snap_size(1920, 1080, ASPECTS["16:9"], 64), (1920, 1088))
-        self.assertEqual(snap_size(1280, 720, ASPECTS["16:9"], 16), (1280, 720))
+        self.assertEqual(snap_size(1920, 1080, COMMON["16:9"], 64), (1920, 1088))
+        self.assertEqual(snap_size(1280, 720, COMMON["16:9"], 16), (1280, 720))
 
     def test_ratio_is_within_a_pixel_when_multiple_is_one(self):
-        for name, ratio in ASPECTS.items():
-            if ratio is None:
-                continue
+        for name, ratio in COMMON.items():
             for size in (1000, 1001, 3333, 4032):
                 w, h = snap_size(size, size, ratio, 1)
                 # the derived side is rounded to the nearest pixel, no further off
                 self.assertLessEqual(abs(w * ratio[1] - h * ratio[0]), max(ratio) / 2, (name, size))
-        self.assertEqual(snap_size(1920, 1080, ASPECTS["16:9"], 1), (1920, 1080))
+        self.assertEqual(snap_size(1920, 1080, COMMON["16:9"], 1), (1920, 1080))
 
     def test_idempotent(self):
         rng = random.Random(1)
         for _ in range(2000):
-            ratio = rng.choice(list(ASPECTS.values()))
+            ratio = rng.choice(RATIOS)
             n = rng.choice([1, 2, 8, 14, 16, 32, 64, 128])
             once = snap_size(rng.randint(1, 5000), rng.randint(1, 5000), ratio, n)
             self.assertEqual(snap_size(*once, ratio, n), once)
@@ -48,18 +89,18 @@ class DefaultBox(unittest.TestCase):
     def test_full_image_when_nothing_constrains_it(self):
         self.assertEqual(default_box(4032, 3024, None, 1), (0, 0, 4032, 3024))
         self.assertEqual(default_box(4032, 3024, None, 16), (0, 0, 4032, 3024))
-        self.assertEqual(default_box(4032, 3024, ASPECTS["4:3"], 16), (0, 0, 4032, 3024))
+        self.assertEqual(default_box(4032, 3024, COMMON["4:3"], 16), (0, 0, 4032, 3024))
 
     def test_largest_centered_cut(self):
-        self.assertEqual(default_size(4032, 3024, ASPECTS["16:9"], 1), (4032, 2268))
-        self.assertEqual(default_box(1200, 900, ASPECTS["16:9"], 64), (24, 130, 1152, 640))
-        self.assertEqual(default_size(1000, 500, ASPECTS["1:1"], 32), (480, 480))
+        self.assertEqual(default_size(4032, 3024, COMMON["16:9"], 1), (4032, 2268))
+        self.assertEqual(default_box(1200, 900, COMMON["16:9"], 64), (24, 130, 1152, 640))
+        self.assertEqual(default_size(1000, 500, COMMON["1:1"], 32), (480, 480))
 
     def test_always_fits_the_image_when_it_can(self):
         rng = random.Random(2)
         for _ in range(2000):
             iw, ih = rng.randint(64, 6000), rng.randint(64, 6000)
-            ratio = rng.choice(list(ASPECTS.values()))
+            ratio = rng.choice(RATIOS)
             n = rng.choice([1, 8, 16, 32, 64])
             w, h = default_size(iw, ih, ratio, n)
             self.assertEqual((w % n, h % n), (0, 0))

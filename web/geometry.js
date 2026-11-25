@@ -2,20 +2,32 @@
 // box the node will cut. tests/test_geometry_parity.py checks the two agree;
 // change them together.
 
-export const ASPECTS = {
-    "free": null,
-    "1:1": [1, 1],
-    "5:4": [5, 4],
-    "4:3": [4, 3],
-    "3:2": [3, 2],
-    "16:9": [16, 9],
-    "21:9": [21, 9],
-    "4:5": [4, 5],
-    "3:4": [3, 4],
-    "2:3": [2, 3],
-    "9:16": [9, 16],
-    "9:21": [9, 21],
-};
+const MAX_TERM = 1000000;   // largest numerator or denominator once reduced
+
+// "W:H", "W/H", "WxH" or a bare width/height number; see parse_aspect.
+const NUM = "([0-9]{1,4})(?:\\.([0-9]{1,4}))?";
+const ASPECT = new RegExp("^" + NUM + "(?:[ ]*[:/x\u00d7][ ]*" + NUM + ")?$");
+
+const gcd = (a, b) => (b ? gcd(b, a % b) : a);
+
+// Aspect-ratio text -> [a, b] (width:height), or null for free. Throws on
+// anything the node would refuse. Decimals become exact fractions, no floats.
+export function parseAspect(text) {
+    const s = String(text ?? "").trim().toLowerCase();
+    if (s === "" || s === "free" || s === "none") return null;
+    const m = ASPECT.exec(s);
+    if (!m) throw new Error(`Invalid aspect ratio "${text}"`);
+    const frac = (whole, part = "") => [Number(whole + part), 10 ** part.length];
+    const [an, ad] = frac(m[1], m[2]);
+    const [bn, bd] = m[3] ? frac(m[3], m[4]) : [1, 1];
+    let a = an * bd, b = ad * bn;
+    if (a === 0 || b === 0) throw new Error(`Invalid aspect ratio "${text}"`);
+    const g = gcd(a, b);
+    a /= g;
+    b /= g;
+    if (a > MAX_TERM || b > MAX_TERM) throw new Error(`Invalid aspect ratio "${text}"`);
+    return [a, b];
+}
 
 export const MAX_SIDE = 16384;
 export const MAX_PIXELS = 128 * 1024 * 1024;

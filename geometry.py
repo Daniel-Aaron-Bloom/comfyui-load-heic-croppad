@@ -10,22 +10,47 @@ any side: whatever lies outside the image is padding.
 """
 
 import json
+import math
+import re
 
-# name -> (a, b) for "a:b" (width:height); None means unconstrained.
-ASPECTS = {
-    "free": None,
-    "1:1": (1, 1),
-    "5:4": (5, 4),
-    "4:3": (4, 3),
-    "3:2": (3, 2),
-    "16:9": (16, 9),
-    "21:9": (21, 9),
-    "4:5": (4, 5),
-    "3:4": (3, 4),
-    "2:3": (2, 3),
-    "9:16": (9, 16),
-    "9:21": (9, 21),
-}
+MAX_TERM = 1_000_000    # largest numerator or denominator once reduced
+
+# "W:H", "W/H", "WxH" or a bare width/height number; each number has at most
+# 4 digits before and 4 after the point, so the exact-integer arithmetic below
+# stays inside what JS doubles hold exactly.
+_NUM = r"([0-9]{1,4})(?:\.([0-9]{1,4}))?"
+_ASPECT = re.compile(_NUM + r"(?:[ ]*[:/x\u00d7][ ]*" + _NUM + ")?")
+ASPECT_HELP = 'use W:H such as 16:9 or 2.39:1, a width/height number such as 1.5, or "free"'
+
+
+def parse_aspect(text):
+    """Aspect-ratio text -> (a, b) for "a:b" (width:height), or None for free.
+
+    Decimals become exact fractions (1.78 -> 89:50), never floats. Raises
+    ValueError for anything else, including a ratio that is zero or absurd.
+    """
+    s = (text or "").strip().lower()
+    if s in ("", "free", "none"):
+        return None
+    m = _ASPECT.fullmatch(s)
+    if not m:
+        raise ValueError("Invalid aspect ratio %r: %s" % (text, ASPECT_HELP))
+
+    def frac(whole, part):          # "1.25" -> (125, 100)
+        part = part or ""
+        return int(whole + part), 10 ** len(part)
+
+    an, ad = frac(m[1], m[2])
+    bn, bd = frac(m[3], m[4]) if m[3] else (1, 1)
+    a, b = an * bd, ad * bn         # (an/ad) / (bn/bd)
+    if a == 0 or b == 0:
+        raise ValueError("Invalid aspect ratio %r: it cannot be zero" % text)
+    g = math.gcd(a, b)
+    a, b = a // g, b // g
+    if a > MAX_TERM or b > MAX_TERM:
+        raise ValueError("Invalid aspect ratio %r: too extreme or too precise" % text)
+    return a, b
+
 
 MAX_SIDE = 16384
 MAX_PIXELS = 128 * 1024 * 1024

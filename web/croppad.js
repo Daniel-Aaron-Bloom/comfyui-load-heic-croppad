@@ -1,7 +1,7 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import { CropEditor } from "./editor.js";
-import { ASPECTS } from "./geometry.js";
+import { parseAspect } from "./geometry.js";
 
 const NODE = "LoadImageHEICCropPad";
 const MIN_EDITOR_HEIGHT = 220;
@@ -68,9 +68,15 @@ function setup(node) {
         node.setDirtyCanvas(true, true);
     }
 
+    // The ratio is free text. While it does not parse the editor keeps the
+    // last good one; the node reports the error when the workflow is queued.
+    let ratio = null;
     function applyConstraints() {
+        try {
+            ratio = parseAspect(aspect.value);
+        } catch { /* keep the last good ratio */ }
         editor.setConstraints({
-            ratio: ASPECTS[aspect.value] ?? null,
+            ratio,
             n: Number(multiple.value) || 1,
             fill: fill.value,
         });

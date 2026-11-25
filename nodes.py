@@ -7,7 +7,7 @@ import torch
 import folder_paths
 
 from . import imaging
-from .geometry import ASPECTS, parse_crop, resolve_box
+from .geometry import parse_aspect, parse_crop, resolve_box
 
 
 def input_path(name):
@@ -68,11 +68,13 @@ class LoadImageHEICCropPad:
                     "tooltip": "Image file from the input folder. HEIC/HEIF "
                                "files can be uploaded from the node.",
                 }),
-                "aspect_ratio": (list(ASPECTS), {
-                    "default": "free",
-                    "tooltip": "Lock the area's shape. As close as the "
-                               "multiple allows: 16:9 at a multiple of 64 "
-                               "gives 1920x1088, not an exact 16:9.",
+                "aspect_ratio": ("STRING", {
+                    "default": "free", "multiline": False,
+                    "tooltip": "Lock the area's shape: W:H such as 16:9 or "
+                               "2.39:1, a width/height number such as 1.5, "
+                               "or 'free'. As close as the multiple allows: "
+                               "16:9 at a multiple of 64 gives 1920x1088, "
+                               "not an exact 16:9.",
                 }),
                 "multiple_of": ("INT", {
                     "default": 1, "min": 1, "max": 512, "step": 1,
@@ -93,7 +95,7 @@ class LoadImageHEICCropPad:
     def load(self, image, aspect_ratio, multiple_of, pad_fill, crop=""):
         rgb, alpha = imaging.load_arrays(input_path(image))
         ih, iw = rgb.shape[:2]
-        box = resolve_box(crop, iw, ih, ASPECTS[aspect_ratio], multiple_of)
+        box = resolve_box(crop, iw, ih, parse_aspect(aspect_ratio), multiple_of)
         out, mask = imaging.crop_pad(rgb, alpha, box, pad_fill)
         out = torch.from_numpy(out.astype(np.float32) / 255.0)[None]
         return (out, torch.from_numpy(mask)[None])
@@ -114,8 +116,10 @@ class LoadImageHEICCropPad:
             return str(exc)
         if not (imaging.is_image_name(path) and os.path.isfile(path)):
             return "Invalid image file: %s" % image
-        if aspect_ratio not in ASPECTS:
-            return "Invalid aspect ratio: %s" % aspect_ratio
+        try:
+            parse_aspect(aspect_ratio)
+        except ValueError as exc:
+            return str(exc)
         if pad_fill not in imaging.PAD_CHOICES:
             return "Invalid pad fill: %s" % pad_fill
         if not 1 <= multiple_of <= 512:

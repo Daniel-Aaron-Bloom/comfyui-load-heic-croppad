@@ -37,7 +37,7 @@ Landing on an edge never pads; you have to pull clearly past it.
 
 | Widget | |
 | --- | --- |
-| `aspect_ratio` | Lock the box's shape. Exact when `multiple_of` is 1 (to the pixel); otherwise as close as the multiple allows. 16:9 on a multiple of 64 gives 1920×1088. |
+| `aspect_ratio` | Lock the box's shape. Free text: `16:9`, `4/3`, `1920x1080`, a decimal ratio like `2.39:1`, a bare width/height number like `1.5`, or `free` (or empty) for no lock. Exact when `multiple_of` is 1 (to the pixel); otherwise as close as the multiple allows. 16:9 on a multiple of 64 gives 1920×1088. Text that isn't a ratio is rejected when the workflow is queued; until it parses, the preview keeps the last good ratio. |
 | `multiple_of` | Output width and height are multiples of this (8, 16, 32, 64 for most models). |
 | `pad_fill` | `gray`, `black`, `white`, or `edge` (repeat the border pixels). |
 

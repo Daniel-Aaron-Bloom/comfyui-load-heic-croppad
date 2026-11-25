@@ -12,9 +12,12 @@ import unittest
 HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(HERE, ".."))
 
-from geometry import ASPECTS, conform_box, default_box, default_size, snap_size  # noqa: E402
+from geometry import (conform_box, default_box, default_size, parse_aspect,  # noqa: E402
+                      snap_size)
 
-RATIOS = list(ASPECTS.values())
+RATIOS = [None] + [parse_aspect(t) for t in (
+    "1:1", "5:4", "4:3", "3:2", "16:9", "21:9", "4:5", "3:4", "2:3", "9:16", "9:21",
+    "2.39", "1.91:1", "0.8", "1234:57", "7:1000")]
 MULTIPLES = [1, 2, 8, 14, 16, 32, 64, 128, 256, 512]
 
 
@@ -54,6 +57,27 @@ class Parity(unittest.TestCase):
         got = _js(cases)
         for case, want, have in zip(cases, expected, got):
             self.assertEqual(have, want, case)
+
+    def test_aspect_parsing_agrees(self):
+        texts = ["free", "FREE", " free ", "", "  ", "none", "16:9", " 9 : 16 ", "4/3", "1920x1080",
+                 "1920X1080", "1920\u00d71080", "32:18", "1.5", "0.75", "1.78", "2.39:1", "1.5:0.5",
+                 "2", "abc", "16:", ":9", "16:9:1", "-1:1", "1e3", "1.", ".5", "0", "0:1", "1:0",
+                 "12345:1", "1.12345", "1,5", "\uff11:1", "1:1\n2", "9999.9999:0.0001",
+                 "9999:0.0001", "0.0001:9999", "1234:57", "7:1000", "9999.9999", "0.0001"]
+        rng = random.Random(9)
+        for _ in range(500):
+            texts.append("%d%s:%d%s" % (rng.randint(0, 99999), rng.choice(["", ".25", ".5", ".0001"]),
+                                        rng.randint(0, 99999), rng.choice(["", ".75", ".333"])))
+        want = []
+        for t in texts:
+            try:
+                r = parse_aspect(t)
+                want.append(list(r) if r else None)
+            except ValueError:
+                want.append({"error": True})
+        got = _js([{"fn": "aspect", "text": t} for t in texts])
+        for t, w, g in zip(texts, want, got):
+            self.assertEqual(g, w, t)
 
     def test_bounded_editor_snap_is_always_a_legal_box(self):
         # What the editor writes while dragging inside the image must be a
